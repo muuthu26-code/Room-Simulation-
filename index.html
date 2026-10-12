@@ -36,7 +36,7 @@
             white-space: pre-wrap !important;
             word-wrap: break-word !important;
             overflow-wrap: break-word !important;
-            resize: none;
+            resize: vertical;
         }
 
         /* Hide scrollbars for smooth swiping on mobile */
@@ -219,7 +219,7 @@
                 <button onclick="app.togglePreview()" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-3 py-2 sm:px-4 sm:py-2 rounded-lg font-medium flex-1 sm:flex-none flex items-center justify-center gap-2 transition-colors text-sm sm:text-base">
                     <i class="fa-solid fa-eye"></i> Preview
                 </button>
-                <button onclick="window.print()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 sm:px-4 sm:py-2 rounded-lg font-medium w-full sm:w-auto flex items-center justify-center gap-2 transition-colors text-sm sm:text-base">
+                <button onclick="app.exportPDF()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 sm:px-4 sm:py-2 rounded-lg font-medium w-full sm:w-auto flex items-center justify-center gap-2 transition-colors text-sm sm:text-base">
                     <i class="fa-solid fa-file-pdf"></i> Export PDF
                 </button>
             </div>
@@ -571,6 +571,7 @@
             updateMeta(field, value) {
                 const report = this.getCurrentReport();
                 if (report) {
+                    if (!report.meta) report.meta = {};
                     report.meta[field] = value;
                     if (field === 'auditor') {
                         this.currentAuditorName = value;
@@ -586,6 +587,9 @@
             updateItemStatus(index, status) {
                 const report = this.getCurrentReport();
                 if (report) {
+                    if (!report.items) report.items = {};
+                    if (!report.items[index]) report.items[index] = { status: null, remarks: '', photos: [] };
+                    
                     report.items[index].status = (report.items[index].status === status) ? null : status;
                     this.saveToCloud();
                     this.renderChecklist();
@@ -595,12 +599,15 @@
             updateItemRemarks(index, value) {
                 const report = this.getCurrentReport();
                 if (report) {
+                    if (!report.items) report.items = {};
+                    if (!report.items[index]) report.items[index] = { status: null, remarks: '', photos: [] };
+                    
                     report.items[index].remarks = value;
                     this.saveToCloud();
                 }
             },
 
-            // Optimal Photo Compression: 800px max width + 0.75 JPEG quality ensures fast cloud sync & clear high-res PDF evidence
+            // High-quality image compression ensuring byte size per image stays optimal (~50-80KB) while maintaining viewability
             compressImage(file) {
                 return new Promise((resolve) => {
                     const reader = new FileReader();
@@ -623,7 +630,7 @@
                             ctx.imageSmoothingEnabled = true;
                             ctx.imageSmoothingQuality = 'high';
                             ctx.drawImage(img, 0, 0, width, height);
-                            resolve(canvas.toDataURL('image/jpeg', 0.75)); 
+                            resolve(canvas.toDataURL('image/jpeg', 0.60)); 
                         };
                         img.src = e.target.result;
                     };
@@ -642,8 +649,14 @@
                 if (!report) return;
                 if (!report.generalPhotos) report.generalPhotos = [];
 
-                const compressedImages = await Promise.all(Array.from(files).map(file => this.compressImage(file)));
-                report.generalPhotos.push(...compressedImages);
+                for (let file of files) {
+                    if (file.size > 10 * 1024 * 1024) {
+                        alert(`File ${file.name} exceeds the 10MB limit.`);
+                        continue;
+                    }
+                    const compressed = await this.compressImage(file);
+                    report.generalPhotos.push(compressed);
+                }
                 this.saveToCloud();
                 this.renderGeneralPhotos();
                 event.target.value = ''; // Reset input to allow re-uploading same file
@@ -663,7 +676,7 @@
                 const container = document.getElementById('general-photos-container');
                 if(!report || !container) return;
                 container.innerHTML = (report.generalPhotos || []).map((p, i) => `
-                    <div class="relative group shrink-0 w-36 h-36 rounded-lg border border-slate-200 overflow-hidden shadow-sm print:w-32 print:h-32">
+                    <div class="relative group shrink-0 w-40 h-40 sm:w-52 sm:h-52 rounded-lg border border-slate-200 overflow-hidden shadow-sm print:w-36 print:h-36">
                         <img src="${p}" class="w-full h-full object-cover">
                         <button onclick="app.removeGeneralPhoto(${i})" class="no-print absolute top-1 right-1 bg-red-500 text-white w-6 h-6 rounded-full flex items-center justify-center opacity-90 hover:opacity-100 transition-opacity">
                             <i class="fa-solid fa-xmark text-xs"></i>
@@ -683,10 +696,19 @@
                 if (!files || files.length === 0) return;
                 const report = this.getCurrentReport();
                 if (!report) return;
+                
+                if (!report.items) report.items = {};
+                if (!report.items[idx]) report.items[idx] = { status: null, remarks: '', photos: [] };
                 if (!report.items[idx].photos) report.items[idx].photos = [];
 
-                const compressedImages = await Promise.all(Array.from(files).map(file => this.compressImage(file)));
-                report.items[idx].photos.push(...compressedImages);
+                for (let file of files) {
+                    if (file.size > 10 * 1024 * 1024) {
+                        alert(`File ${file.name} exceeds the 10MB limit.`);
+                        continue;
+                    }
+                    const compressed = await this.compressImage(file);
+                    report.items[idx].photos.push(compressed);
+                }
                 this.saveToCloud();
                 this.renderChecklist();
                 event.target.value = ''; // Reset input to allow re-uploading same file
@@ -694,11 +716,33 @@
 
             removeItemPhoto(itemIdx, photoIdx) {
                 const report = this.getCurrentReport();
-                if (report && confirm("Remove this evidence photo?")) {
+                if (report && report.items && report.items[itemIdx] && confirm("Remove this evidence photo?")) {
                     report.items[itemIdx].photos.splice(photoIdx, 1);
                     this.saveToCloud();
                     this.renderChecklist();
                 }
+            },
+
+            exportPDF() {
+                const report = this.getCurrentReport();
+                if (report) {
+                    let totalSizeBytes = 0;
+                    if (report.generalPhotos) {
+                        report.generalPhotos.forEach(p => totalSizeBytes += (p.length * 0.75));
+                    }
+                    if (report.items) {
+                        Object.values(report.items).forEach(item => {
+                            if (item && item.photos) {
+                                item.photos.forEach(p => totalSizeBytes += (p.length * 0.75));
+                            }
+                        });
+                    }
+                    if (totalSizeBytes > 10 * 1024 * 1024) {
+                        alert("The total size of attachments in this report exceeds 10MB. Please remove some photos before exporting to PDF.");
+                        return;
+                    }
+                }
+                window.print();
             },
 
             renderDashboard() {
@@ -711,7 +755,7 @@
 
                 if (this.filterMode === 'my' && this.currentAuditorName) {
                     activeReports = activeReports.filter(r => 
-                        (r.meta.auditor || '').toLowerCase().trim() === this.currentAuditorName.toLowerCase().trim()
+                        (r.meta && r.meta.auditor || '').toLowerCase().trim() === this.currentAuditorName.toLowerCase().trim()
                     );
                 }
 
@@ -727,8 +771,8 @@
                 activeReports.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
                 activeReports.forEach(report => {
-                    const roomInfo = report.meta.roomNo ? `Room ${escapeHTML(report.meta.roomNo)}` : "No Room";
-                    const auditorInfo = report.meta.auditor ? escapeHTML(report.meta.auditor) : "Unassigned";
+                    const roomInfo = (report.meta && report.meta.roomNo) ? `Room ${escapeHTML(report.meta.roomNo)}` : "No Room";
+                    const auditorInfo = (report.meta && report.meta.auditor) ? escapeHTML(report.meta.auditor) : "Unassigned";
                     
                     const statusBadge = report.isCompleted 
                         ? `<span class="bg-emerald-100 text-emerald-800 text-xs px-2.5 py-1 rounded-full font-semibold border border-emerald-200"><i class="fa-solid fa-check mr-1"></i> Completed</span>`
@@ -749,7 +793,7 @@
                                 <div class="flex items-center gap-3 text-sm text-slate-500 mt-1">
                                     <span><i class="fa-solid fa-user text-xs mr-1"></i> ${auditorInfo}</span>
                                     <span>•</span>
-                                    <span><i class="fa-regular fa-calendar mr-1"></i> ${escapeHTML(report.meta.date)}</span>
+                                    <span><i class="fa-regular fa-calendar mr-1"></i> ${escapeHTML((report.meta && report.meta.date) || '')}</span>
                                 </div>
                             </div>
                         </div>
@@ -782,8 +826,8 @@
                 const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
 
                 trashedReports.forEach(report => {
-                    const date = escapeHTML(report.meta.date) || "No Date";
-                    const roomInfo = report.meta.roomNo ? `Room ${escapeHTML(report.meta.roomNo)}` : "No Room Info";
+                    const date = escapeHTML((report.meta && report.meta.date) || "No Date");
+                    const roomInfo = (report.meta && report.meta.roomNo) ? `Room ${escapeHTML(report.meta.roomNo)}` : "No Room Info";
                     
                     const timeInTrash = now - report.deletedAt;
                     const daysLeft = Math.ceil((THIRTY_DAYS - timeInTrash) / (1000 * 60 * 60 * 24));
@@ -831,6 +875,8 @@
                     toggleBtn.innerHTML = `<i class="fa-solid fa-circle-check"></i> Mark Completed`;
                 }
 
+                if (!report.meta) report.meta = {};
+
                 document.getElementById('meta-date').value = report.meta.date || '';
                 document.getElementById('meta-time').value = report.meta.time || '';
                 document.getElementById('meta-auditor').value = report.meta.auditor || '';
@@ -845,11 +891,23 @@
             renderChecklist() {
                 const report = this.getCurrentReport();
                 const container = document.getElementById('checklist-container');
+                if (!report || !container) return;
+
+                if (!report.items) report.items = {};
+
+                // Preserve active element focus during checklist render
+                const activeEl = document.activeElement;
+                const activeId = activeEl ? activeEl.id : null;
+                const activeSelectionStart = (activeEl && activeEl.tagName === 'TEXTAREA') ? activeEl.selectionStart : null;
+
                 container.innerHTML = '';
                 let lastCat = "";
 
                 AUDIT_QUESTIONS.forEach((q, index) => {
-                    const itemData = report.items[index] || { status: null, remarks: '', photos: [] };
+                    if (!report.items[index]) {
+                        report.items[index] = { status: null, remarks: '', photos: [] };
+                    }
+                    const itemData = report.items[index];
                     const isYes = itemData.status === 'yes';
                     const isNo = itemData.status === 'no';
                     const isNA = itemData.status === 'na';
@@ -866,22 +924,22 @@
                     row.className = "p-4 sm:p-6 hover:bg-slate-50/50 transition-colors avoid-break border-b border-slate-100 last:border-0 print:p-1.5 print:py-1";
 
                     const photosHtml = (itemData.photos || []).map((p, pi) => `
-                        <div class="relative group shrink-0 w-28 h-28 rounded-lg border border-slate-200 overflow-hidden shadow-sm print:w-24 print:h-24">
+                        <div class="relative group shrink-0 w-36 h-36 sm:w-44 sm:h-44 rounded-lg border border-slate-200 overflow-hidden shadow-sm print:w-32 print:h-32">
                             <img src="${p}" class="w-full h-full object-cover">
-                            <button onclick="app.removeItemPhoto(${index}, ${pi})" class="no-print absolute top-0 right-0 bg-red-500 text-white w-5 h-5 rounded-bl flex items-center justify-center opacity-90 hover:opacity-100 transition-opacity">
-                                <i class="fa-solid fa-xmark text-[10px]"></i>
+                            <button onclick="app.removeItemPhoto(${index}, ${pi})" class="no-print absolute top-0 right-0 bg-red-500 text-white w-6 h-6 rounded-bl flex items-center justify-center opacity-90 hover:opacity-100 transition-opacity">
+                                <i class="fa-solid fa-xmark text-xs"></i>
                             </button>
                         </div>
                     `).join('');
 
                     row.innerHTML = `
                         <div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-start print:gap-1">
-                            <div class="md:col-span-6 pr-0 md:pr-4">
+                            <div class="md:col-span-5 pr-0 md:pr-4">
                                 <div class="flex items-start">
                                     <span class="text-slate-400 text-sm font-bold mr-2 mt-1 print:text-[10px] print:mt-0">${index + 1}.</span>
                                     <div class="flex-1">
                                         <span class="text-slate-800 font-medium print:text-[10px] print:leading-tight">${escapeHTML(q.text)}</span>
-                                        <div class="mt-3 flex flex-wrap gap-2 empty:hidden print:mt-1">
+                                        <div class="mt-3 flex flex-wrap gap-3 empty:hidden print:mt-1">
                                             ${photosHtml}
                                         </div>
                                     </div>
@@ -909,17 +967,27 @@
                                 </button>
                             </div>
 
-                            <div class="md:col-span-3 flex flex-col gap-2 print:gap-0.5">
-                                <textarea rows="1" 
-                                    oninput="app.updateItemRemarks(${index}, this.value); this.style.height = 'auto'; this.style.height = this.scrollHeight + 'px';"
+                            <div class="md:col-span-4 flex flex-col gap-2 print:gap-0.5">
+                                <textarea id="item-remark-${index}" rows="3" 
+                                    oninput="app.updateItemRemarks(${index}, this.value);"
                                     placeholder="Remarks..." 
-                                    class="auto-wrap w-full text-sm p-2 border border-slate-200 rounded-md outline-none print:hidden">${escapeHTML(itemData.remarks)}</textarea>
+                                    class="auto-wrap w-full text-sm p-3 min-h-[90px] border border-slate-300 focus:border-indigo-600 rounded-md outline-none bg-white text-slate-800 print:hidden">${escapeHTML(itemData.remarks || '')}</textarea>
                                 <div class="hidden print:block whitespace-pre-wrap break-words print:text-[10px] print:leading-tight print:pt-0.5">${escapeHTML(itemData.remarks || '')}</div>
                             </div>
                         </div>
                     `;
                     container.appendChild(row);
                 });
+
+                if (activeId) {
+                    const restoredEl = document.getElementById(activeId);
+                    if (restoredEl) {
+                        restoredEl.focus();
+                        if (activeSelectionStart !== null) {
+                            restoredEl.setSelectionRange(activeSelectionStart, activeSelectionStart);
+                        }
+                    }
+                }
             }
         };
 
